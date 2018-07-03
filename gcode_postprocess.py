@@ -11,7 +11,7 @@ def parse_command(cmd):
 			F : set feedrate
 	'''
 	cmd_dict = {}
-	cmd_split = cmd.split(' ')
+	cmd_split = cmd.rstrip('\n').split(' ')
 
 	# first word must be G or M code
 	if(cmd_split[0][0] == 'G' or cmd_split[0][0] == 'M'):
@@ -72,10 +72,11 @@ def compensate_extrude(cmd_list, dist, e_dist, feedrate, accel):
 		return cmd_list
 
 	accel_frac = 0
-	max_speed = feedrate
+	speed = feedrate/54 # convert from feedrate to mm/s
+	max_speed = speed
 	# check if desired feedrate is reached based on move distance and acceleration
 	# can you assume that the feedrate is the same during an entire block?
-	if(feedrate/accel < math.sqrt(dist/accel)): # reaches desired speed
+	if(speed/accel < math.sqrt(dist/accel)): # reaches desired speed
 		# distance during acceleration
 		accel_frac = (speed**2/accel)/dist
 	else:
@@ -88,10 +89,10 @@ def compensate_extrude(cmd_list, dist, e_dist, feedrate, accel):
 
 	# attempt 1
 	# use average move speed, and subtract leaked amount from tail of moves
-	C = 0.001 # constant to tune leak adjustment
+	C = 0.02 # constant to tune leak adjustment
 	avg_speed = (max_speed/2)*accel_frac + max_speed*(1-accel_frac)
 
-	V_leak = C*avg_speed # volume of leaked material
+	V_leak = C*math.sqrt(avg_speed) # volume of leaked material
 
 	# check if there's only one command
 	if(len(cmd_list) == 1):
@@ -119,6 +120,7 @@ def compensate_extrude(cmd_list, dist, e_dist, feedrate, accel):
 				y_prev = cmd_list[i-1]['Y']
 				x = cmd_list[i]['X']
 				y = cmd_list[i]['Y']
+				e_end = cmd_list[i]['E']
 
 				# modify shortened extrude segment
 				cmd_list[i]['E'] -= V_leak
@@ -126,7 +128,10 @@ def compensate_extrude(cmd_list, dist, e_dist, feedrate, accel):
 				cmd_list[i]['Y'] = y_prev + extrude_frac*(y - y_prev)
 
 				# add non-extrude segment
-				cmd_list.insert(i+1, {'command':'G1', 'X':x, 'Y':y})
+				# cmd_list.insert(i+1, {'command':'G1', 'X':x, 'Y':y})
+				cmd_list.insert(i+1, {'command':'G92', 'E':0})
+				cmd_list.insert(i+2, {'command':'G1', 'X':x, 'Y':y, 'E':-2*V_leak}) # retract during final move segment
+				cmd_list.insert(i+3, {'command':'G92', 'E':e_end}) # reset extrude position to not cause problems with next extrude
 
 				break
 
@@ -152,6 +157,7 @@ def main():
 	feedrate = 0
 	accel_max = 0
 	last_pt = (0,0) # keeps track of the (X,Y) coordinates of the preceding point
+	new_feedrate = True
 
 	# open original gcode file and read line by line
 	with open(gcode_file_path, 'r') as f_in:
@@ -161,8 +167,10 @@ def main():
 
 			if(parsed_cmd['command'] != 'invalid'):
 				# update feedrate if it has changed
+				new_feedrate = False
 				if('F' in parsed_cmd):
 					feedrate = parsed_cmd['F']
+					new_feedrate = True
 
 				# write block to file if extrude block has just ended (last command was extrude, but not this one)
 				if(in_extrude_block and not is_extrude_cmd(parsed_cmd)):
@@ -203,7 +211,10 @@ def main():
 						extrude_dist = 0
 
 					# append dict of command values
-					tmp = {'X':parsed_cmd['X'], 'Y':parsed_cmd['Y'], 'E':parsed_cmd['E'], 'F':feedrate}
+					if(new_feedrate):
+						tmp = {'X':parsed_cmd['X'], 'Y':parsed_cmd['Y'], 'E':parsed_cmd['E'], 'F':feedrate}
+					else:
+						tmp = {'X':parsed_cmd['X'], 'Y':parsed_cmd['Y'], 'E':parsed_cmd['E']}
 					cmd_list.append(tmp)
 
 					# add segment length to running total
@@ -221,7 +232,10 @@ def main():
 						cartesian_dist = 0
 
 					# append dict of command values
-					tmp = {'X':parsed_cmd['X'], 'Y':parsed_cmd['Y'], 'F':feedrate}
+					if(new_feedrate):
+						tmp = {'X':parsed_cmd['X'], 'Y':parsed_cmd['Y'], 'F':feedrate}
+					else:
+						tmp = {'X':parsed_cmd['X'], 'Y':parsed_cmd['Y']}
 					cmd_list.append(tmp)
 
 				# no processing if it isn't a travel or extrude command
